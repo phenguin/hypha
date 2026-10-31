@@ -23,14 +23,16 @@ import Data.ByteString.Base16 qualified as Base16
 import Data.ByteString.Lazy qualified as LBS
 import qualified Data.Aeson.Yaml as Aeson.Yaml
 import Data.Map.Strict qualified as Map
-import Data.Maybe (maybeToList)
+import Data.List (partition)
+import Data.Maybe (isJust, maybeToList)
 import Data.Set qualified as Set
 import Data.Set (Set)
 import Data.Text.Encoding qualified as Text
 import Data.Text qualified as Text
 import Data.Text (Text)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
-import Hypha.BuildEnv.Cabal (CabalStoreError (..), mkCabalBuildEnv)
+import Hypha.BuildEnv.Cabal
+  (CabalStoreError (..), ghcDirVersion, mkCabalBuildEnv, resolveStoreDir)
 import Hypha.BuildEnv.Type (BuildEnv (..))
 import Hypha.Cache (hackageCacheDir)
 import Hypha.Cache qualified as Cache
@@ -265,9 +267,9 @@ candidateStoreDirs :: FilePath -> IO [FilePath]
 candidateStoreDirs storeBase = do
   mFromPath <- detectGhcVersionFromPath
   enumerated <- enumerateStoreGhcDirs storeBase
-  let preferred = maybeToList (fmap (\v -> "ghc-" <> Text.unpack v) mFromPath)
-      ordered   = preferred <> [ d | d <- enumerated, d `notElem` preferred ]
-  pure (map (storeBase </>) ordered)
+  let forPathGhc d = isJust mFromPath && ghcDirVersion d == mFromPath
+      (preferred, rest) = partition forPathGhc enumerated
+  pure (map (storeBase </>) (preferred <> rest))
 
 -- | Enumerate @ghc-*@ subdirectories of the cabal store, if any.
 enumerateStoreGhcDirs :: FilePath -> IO [FilePath]
@@ -298,6 +300,13 @@ renderCabalStoreError :: CabalStoreError -> Text
 renderCabalStoreError = \case
   StoreNotFound p   -> "store directory missing (" <> Text.pack p <> ")"
   GhcVersionUnknown -> "could not determine GHC version from store path"
+  NoStoreForCompiler base mVer ->
+    "no store directory for " <> maybe "any GHC" ("ghc-" <>) mVer
+      <> " under " <> Text.pack base
+  AmbiguousStore base dirs ->
+    "several store directories under " <> Text.pack base
+      <> " fit and none holds a unit of the plan: "
+      <> Text.intercalate ", " (map Text.pack dirs)
 
 -- | Per-command dispatch.
 runClientCommand :: ClientCommand -> Hypha (Outcome Value)
@@ -663,16 +672,12 @@ planHashFromText t =
 -- 'scavengeStoreTxt' treats that as \"no scavenging available\" and
 -- falls back to 'defaultHaddockRunner'.
 defaultStoreRoot :: Maybe ProjectRoot -> IO FilePath
-defaultStoreRoot mRoot = do
-  base <- cabalStoreBase mRoot
-  ok <- doesDirectoryExist base
-  if not ok
-    then pure ""
-    else do
-      entries <- listDirectory base
-      case [ e | e <- entries, "ghc-" `Text.isPrefixOf` Text.pack e ] of
-        (e:_) -> pure (base </> e)
-        []    -> pure ""
+defaultStoreRoot Nothing = pure ""
+defaultStoreRoot mRoot@(Just root) = do
+  base   <- cabalStoreBase mRoot
+  pinned <- either (const Map.empty) id <$> loadPlanVersions root
+  either (const "") id
+    <$> resolveStoreDir base Nothing (map Plan.ppUnitId (Map.elems pinned))
 
 -- | Best-effort lookup of GHC's distribution doc directory — where
 -- boot libs (@base@, @containers@, ...) keep their pre-shipped
@@ -734,11 +739,11 @@ mkBuildEnv root plan = do
                       else planVer
   if verForStore == "unknown"
     then pure (offlineNullBuildEnv ghcVer)
-    else do
-      let ghcDir   = "ghc-" <> Text.unpack verForStore
-          storeDir = storeBase </> ghcDir
-      warnOnLeft renderCabalStoreError (offlineNullBuildEnv ghcVer)
-                 (mkCabalBuildEnv storeDir)
+    else
+      warnOnLeft renderCabalStoreError (offlineNullBuildEnv ghcVer) $
+        resolveStoreDir storeBase (Just verForStore)
+                        (map puUnitId (Map.elems (bpUnits plan)))
+          >>= either (pure . Left) mkCabalBuildEnv
 
 -- | Empty BuildEnv used when no cabal store is reachable.  All
 -- operations return 'Nothing' / empty sets.  The GHC version is

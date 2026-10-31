@@ -5,10 +5,16 @@ module Hypha.BuildEnv.Cabal
     CabalStoreError (..)
     -- * Construction
   , mkCabalBuildEnv
+  , resolveStoreDir
+  , ghcDirVersion
   ) where
 
 import Control.Exception.Safe (IOException, try)
-import Data.List (find, isPrefixOf)
+import Control.Monad (filterM)
+import Data.Char (isDigit)
+import Data.List (find, isPrefixOf, sort, sortOn)
+import Data.Ord (Down (..))
+import Data.Text (Text)
 import Data.Maybe (mapMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -25,7 +31,7 @@ import qualified Hypha.Cabal.RepoCache as RepoCache
 import Hypha.Cabal.RepoCache (renderRepoLookupError)
 import Hypha.Types.PackageId
   ( PackageName (..), Version (..), PackageId (..)
-  , PackageRef (..), parsePackageRef )
+  , PackageRef (..), UnitId (..), parsePackageRef )
 
 -- | Errors specific to the Cabal build environment.
 data CabalStoreError
@@ -33,7 +39,53 @@ data CabalStoreError
     -- ^ The cabal store directory does not exist.
   | GhcVersionUnknown
     -- ^ Could not determine GHC version from the store path.
+  | NoStoreForCompiler !FilePath !(Maybe Text)
+    -- ^ The store base has no @ghc-*@ directory for this compiler.
+  | AmbiguousStore !FilePath ![FilePath]
+    -- ^ Several @ghc-*@ directories fit and none holds a unit of the plan.
   deriving stock (Show, Eq)
+
+-- | The @ghc-*@ directory of a store base that a plan builds into.
+--
+--   cabal >= 3.12 names it @ghc-X.Y.Z-<abi>@ and older cabal @ghc-X.Y.Z@,
+--   and one compiler version can have one directory per ABI. The directory
+--   holding the plan's own units is the one cabal used; without that
+--   evidence a lone directory for the compiler is taken, and several are
+--   reported rather than picked by @readdir@ order.
+resolveStoreDir
+  :: FilePath    -- ^ store base, e.g. @~/.cabal/store@
+  -> Maybe Text  -- ^ the plan's compiler version, if known
+  -> [UnitId]    -- ^ the plan's unit ids
+  -> IO (Either CabalStoreError FilePath)
+resolveStoreDir base mVer unitIds = do
+  listed <- try @IO @IOException (listDirectory base)
+  case listed of
+    Left _ -> pure (Left (StoreNotFound base))
+    Right entries -> do
+      let candidates = sort
+            [ e | e <- entries
+                , Just v <- [ghcDirVersion e]
+                , maybe True (== v) mVer ]
+          holds c = length <$> filterM
+            (\(UnitId u) -> doesDirectoryExist (base </> c </> Text.unpack u))
+            unitIds
+      counts <- traverse (\c -> (c,) <$> holds c) candidates
+      pure $ case sortOn (Down . snd) (filter ((> 0) . snd) counts) of
+        (c, _) : _ -> Right (base </> c)
+        [] -> case candidates of
+          [c] -> Right (base </> c)
+          []  -> Left (NoStoreForCompiler base mVer)
+          cs  -> Left (AmbiguousStore base cs)
+
+-- | The compiler version a store directory is for: @ghc-9.10.3@ and
+--   @ghc-9.10.3-1be3@ are both for @9.10.3@.
+ghcDirVersion :: FilePath -> Maybe Text
+ghcDirVersion name = case splitAt 4 name of
+  ("ghc-", rest)
+    | (ver@(_ : _), suffix) <- span (\c -> isDigit c || c == '.') rest
+    , null suffix || take 1 suffix == "-"
+    -> Just (Text.pack ver)
+  _ -> Nothing
 
 -- | Create a 'BuildEnv' backed by the Cabal store at @~/.cabal/store/ghc-X.Y.Z/@.
 --
@@ -58,18 +110,9 @@ mkCabalBuildEnv storeRoot = do
     else pure (Left (StoreNotFound storeRoot))
 
 -- | Detect GHC version from the store directory name.
---   Expects format: @ghc-X.Y.Z@
 detectGhcVersion :: FilePath -> IO (Maybe Version)
-detectGhcVersion storeRoot = do
-  let dirname = takeFileName storeRoot
-  case parseGhcDirName dirname of
-    Nothing -> pure Nothing
-    Just ver -> pure (Just (Version (Text.pack ver)))
-  where
-    parseGhcDirName :: String -> Maybe String
-    parseGhcDirName name
-      | take 4 name == "ghc-" = Just (drop 4 name)
-      | otherwise = Nothing
+detectGhcVersion storeRoot =
+  pure (Version <$> ghcDirVersion (takeFileName storeRoot))
 
 -- | Discover all installed packages in the cabal store.
 discoverInStore :: FilePath -> IO (Set PackageId)
