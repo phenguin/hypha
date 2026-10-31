@@ -33,7 +33,8 @@ import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Exception (displayException)
 import Control.Exception.Safe (IOException, SomeException, try)
 import Control.Monad (when)
-import Data.List (isPrefixOf)
+import Data.List (isPrefixOf, sort)
+import Data.Maybe (catMaybes, listToMaybe)
 import Data.Text (Text)
 import Hypha.Cache qualified as Cache
 import Hypha.Hoogle.Format ( decodeEntities, splitNameSig, stripTags )
@@ -128,11 +129,21 @@ scavengeDistributionTxt :: FilePath -> PackageId -> IO (Maybe FilePath)
 scavengeDistributionTxt distRoot pid = do
   rootOk <- doesDirectoryExist distRoot
   if not rootOk then pure Nothing else do
-    let pkg = Text.unpack (unPackageName (pkgName pid))
-        ver = Text.unpack (unVersion    (pkgVersion pid))
-        path = distRoot </> (pkg <> "-" <> ver) </> (pkg <> ".txt")
-    ok <- doesFileExist path
-    pure (if ok then Just path else Nothing)
+    -- GHC names each directory after the unit, @base-4.21.2.0-fc24@;
+    -- older layouts drop the hash.
+    let pkgVer = Text.unpack (unPackageName (pkgName pid))
+                 <> "-" <> Text.unpack (unVersion (pkgVersion pid))
+    entries <- listDirectory distRoot
+    let dirs = [ distRoot </> e | e <- sort entries
+                                , e == pkgVer || (pkgVer <> "-") `isPrefixOf` e ]
+    listToMaybe . catMaybes <$> mapM (docTxt pid) dirs
+
+-- | @\<dir\>/\<pkg\>.txt@, if @haddock --hoogle@ wrote it there.
+docTxt :: PackageId -> FilePath -> IO (Maybe FilePath)
+docTxt pid dir = do
+  let path = dir </> (Text.unpack (unPackageName (pkgName pid)) <> ".txt")
+  ok <- doesFileExist path
+  pure (if ok then Just path else Nothing)
 
 -- | What we need to know about a unit for Hoogle @.txt@ collection.
 data LocalUnit = LocalUnit
@@ -140,6 +151,9 @@ data LocalUnit = LocalUnit
   , luSrcDirs :: ![FilePath]
     -- ^ @hs-source-dirs@ entries to feed @haddock@ when no store
     -- @.txt@ is available.
+  , luHaddockHtml :: !(Maybe FilePath)
+    -- ^ The unit's @haddock-html@ directory from its package database,
+    -- which holds @\<pkg\>.txt@ when docs were built.
   , luIsLocal :: !Bool
     -- ^ When 'False' we only scavenge the store @.txt@; missing
     -- entries are skipped silently rather than invoking @haddock@
@@ -202,11 +216,13 @@ collectTxtForUnit
   -> LocalUnit
   -> IO (Either HaddockError FilePath)
 collectTxtForUnit runner storeRoot distRoot lu = do
-  -- Prefer the store entry; for boot/distribution libs that aren't
-  -- in the store fall back to GHC's pre-shipped @.txt@.  Last
-  -- resort: build the @.txt@ with @haddock@ for local units.
-  storeHit <- scavengeStoreTxt storeRoot (luPkgId lu)
-  case storeHit of
+  -- Prefer what the unit's package database says; then the store
+  -- entry; for boot/distribution libs that aren't in the store, GHC's
+  -- pre-shipped @.txt@.  Last resort: build the @.txt@ with @haddock@
+  -- for local units.
+  dbHit <- maybe (pure Nothing) (docTxt (luPkgId lu)) (luHaddockHtml lu)
+  found <- maybe (scavengeStoreTxt storeRoot (luPkgId lu)) (pure . Just) dbHit
+  case found of
     Just p  -> pure (Right p)
     Nothing -> do
       distHit <- scavengeDistributionTxt distRoot (luPkgId lu)

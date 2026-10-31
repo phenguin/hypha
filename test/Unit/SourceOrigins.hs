@@ -26,9 +26,10 @@ import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 
 import Hypha.Source.Origins
   ( ModuleOrigins (..), OriginOracle (..), discoverPackageDbs
-  , mkGhcOriginOracle, parseShowIface )
+  , mkGhcOriginOracle, parseHaddockHtmlFields, parseShowIface )
 import Hypha.Types.BuildPlan (CompilerId (..))
-import Hypha.Types.PackageId (PackageId (..), PackageName (..), Version (..))
+import Hypha.Types.PackageId
+  (PackageId (..), PackageName (..), UnitId (..), Version (..))
 import Hypha.Types.SymbolPath (ModulePath (..), SymbolName (..))
 
 -- | The origins of one captured dump, or a failure the case can report.
@@ -51,7 +52,24 @@ only m = Just (ModulePath m :| [])
 
 tests :: TestTree
 tests = testGroup "Unit.SourceOrigins"
-  [ testCase "a qualified export names the module that defines it" $ do
+  [ testCase "ghc-pkg's haddock-html fields map unit ids to doc dirs" $
+      -- Shapes from real databases: a Nix -doc output, a unit without
+      -- docs, and a ghcup unit whose path goes through ../.
+      parseHaddockHtmlFields (Text.unlines
+        [ "id: prettyprinter-1.7.1-adx1gvfFIu6vN9epu6G34"
+        , "haddock-html: /nix/store/x-prettyprinter-1.7.1-doc/share/doc/prettyprinter-1.7.1/html"
+        , "id: rts-1.0.3"
+        , "id: base-4.21.2.0-fc24"
+        , "haddock-html: /g/lib/../share/doc/ghc-9.12.4/html/libraries/base-4.21.2.0-fc24"
+        ])
+        @?= Map.fromList
+          [ ( UnitId "prettyprinter-1.7.1-adx1gvfFIu6vN9epu6G34"
+            , "/nix/store/x-prettyprinter-1.7.1-doc/share/doc/prettyprinter-1.7.1/html" )
+          , ( UnitId "base-4.21.2.0-fc24"
+            , "/g/lib/../share/doc/ghc-9.12.4/html/libraries/base-4.21.2.0-fc24" )
+          ]
+
+  , testCase "a qualified export names the module that defines it" $ do
       -- The symbol this whole exercise started from: exported by
       -- base:Control.Concurrent, declared in ghc-internal, and blamed on
       -- Prelude by anything that reads only the import list.

@@ -12,7 +12,7 @@ import Test.Tasty.HUnit (testCase, (@?=))
 import Hypha.Hoogle.Local
   ( HaddockError (..), HaddockRequest (..), HaddockRunner (..), renderHaddockError
   , HoogleStamp (..), LocalUnit (..), collectTxtForUnit, ensureFresh
-  , scavengeStoreTxt )
+  , scavengeDistributionTxt, scavengeStoreTxt )
 import Hypha.Types.PackageId (PackageId (..), PackageName (..), Version (..))
 
 tests :: TestTree
@@ -46,6 +46,7 @@ tests = testGroup "Unit.HoogleLocalGen"
             lu = LocalUnit
                   { luPkgId   = PackageId (PackageName "foo") (Version "0.1")
                   , luSrcDirs = [tmp </> "src"]
+                  , luHaddockHtml = Nothing
                   , luIsLocal = True
                   }
         createDirectoryIfMissing True (tmp </> "src")
@@ -87,10 +88,32 @@ tests = testGroup "Unit.HoogleLocalGen"
               modifyIORef called (req :)
               pure (Left (HaddockSpawnFailed "must not be called"))
         result <- collectTxtForUnit runner tmp ""
-                    (LocalUnit pid [tmp </> "src"] False)
+                    (LocalUnit pid [tmp </> "src"] Nothing False)
         case result of
           Right p -> p @?= (docDir </> "bar.txt")
           Left e  -> fail (show e)
         seen <- readIORef called
         length seen @?= 0
+
+  , testCase "collectTxtForUnit prefers the package database's haddock-html" $
+      withSystemTempDirectory "hypha-hg" $ \tmp -> do
+        let pid    = PackageId (PackageName "fused-effects") (Version "1.1.2.7")
+            docDir = tmp </> "fused-effects-1.1.2.7-doc" </> "html"
+            runner = HaddockRunner $ \_ ->
+              pure (Left (HaddockSpawnFailed "must not be called"))
+        createDirectoryIfMissing True docDir
+        writeFile (docDir </> "fused-effects.txt") "@package fused-effects\n"
+        result <- collectTxtForUnit runner (tmp </> "no-store") ""
+                    (LocalUnit pid [] (Just docDir) False)
+        result @?= Right (docDir </> "fused-effects.txt")
+
+  , testCase "distribution docs are found under GHC's unit-hash directory" $
+      withSystemTempDirectory "hypha-hg" $ \tmp -> do
+        let pid = PackageId (PackageName "base") (Version "4.21.2.0")
+            dir = tmp </> "base-4.21.2.0-fc24"
+        createDirectoryIfMissing True dir
+        createDirectoryIfMissing True (tmp </> "base-4.21.2.0.1-ab12")
+        writeFile (dir </> "base.txt") "@package base\n"
+        path <- scavengeDistributionTxt tmp pid
+        path @?= Just (dir </> "base.txt")
   ]

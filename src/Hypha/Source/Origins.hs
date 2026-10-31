@@ -39,6 +39,8 @@ module Hypha.Source.Origins
     -- * Discovery
   , discoverPackageDbs
   , ghcLibdir
+  , haddockHtmlDirs
+  , parseHaddockHtmlFields
   ) where
 
 import Control.Exception.Safe (IOException, try)
@@ -65,8 +67,8 @@ import System.Process qualified as Process
 
 import Hypha.Types.BuildPlan (CompilerId (..))
 import Hypha.Types.PackageId
-  ( PackageId (..), PackageName (..), PackageRef (..), Version (..)
-  , parsePackageRef )
+  ( PackageId (..), PackageName (..), PackageRef (..), UnitId (..)
+  , Version (..), parsePackageRef )
 import Hypha.Types.SymbolPath (ModulePath (..), SymbolName (..))
 
 -- | The defining modules of each name a compiled module exports.
@@ -403,6 +405,34 @@ mkGhcModuleOwnerOracle cid dbs = do
     unitId raw = case parsePackageRef raw of
       PackageRef name (Just ver) -> Just (PackageId name ver)
       PackageRef _    Nothing    -> Nothing
+
+-- | Each unit's @haddock-html@ directory, as the global database of the
+-- plan's compiler and the given store databases record it.
+--
+-- One @ghc-pkg@ call answers for every unit, and it is the only source
+-- that knows where any installer put the docs: a Nix @-doc@ output, a
+-- ghcup distribution directory with its unit-hash suffix, or a store
+-- unit built with @documentation: True@.
+haddockHtmlDirs
+  :: CompilerId -> [FilePath] -> IO (Either OriginError (Map UnitId FilePath))
+haddockHtmlDirs cid dbs = locateToolchain cid >>= \case
+  Left e   -> pure (Left e)
+  Right tc -> fmap parseHaddockHtmlFields <$> runTool (gtGhcPkg tc)
+    ( ["--global"] ++ map ("--package-db=" <>) dbs
+      ++ ["field", "*", "id,haddock-html"] )
+
+-- | Read @ghc-pkg field '*' id,haddock-html@: an @id:@ line, followed by a
+-- @haddock-html:@ line when the unit has docs.
+parseHaddockHtmlFields :: Text -> Map UnitId FilePath
+parseHaddockHtmlFields = go . map Text.strip . Text.lines
+  where
+    go (i : h : rest)
+      | Just u <- field "id:" i, Just d <- field "haddock-html:" h
+      , not (Text.null d)
+      = Map.insert (UnitId u) (Text.unpack d) (go rest)
+    go (_ : rest) = go rest
+    go [] = Map.empty
+    field k = fmap Text.strip . Text.stripPrefix k
 
 -- | @ghc --print-libdir@ for the installation matching the plan's
 -- compiler.

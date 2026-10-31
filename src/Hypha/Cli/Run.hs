@@ -587,8 +587,12 @@ ensureProjectHoogle cacheRoot storeRoot distRoot dotHypha _ root = do
           "warning: project Hoogle DB skipped — "
           <> Text.unpack (errorMessage (PlanFailure root planErr))
       Right plan -> do
-        let units = planToLocalUnits plan
-            ph    = planHash plan
+        docs <- haddockDirsFor plan
+        let units = planToLocalUnits docs plan
+            -- Where the docs live is an input too: a database built
+            -- before they were found must not count as fresh.
+            ph    = planHash plan <> "+"
+                      <> planHashFromText (Text.pack (show (Map.toList docs)))
         fp <- aggregateFingerprint units
         let stamp = HogLocal.HoogleStamp ph fp
         HogLocal.ensureFresh HogLocal.defaultHaddockRunner
@@ -633,11 +637,23 @@ withQuietIfNotVerbose False io = do
           hClose savedErr)
       (const io)
 
-planToLocalUnits :: BuildPlan -> [HogLocal.LocalUnit]
-planToLocalUnits plan =
+-- | The plan's units' @haddock-html@ directories.  Best-effort: without
+-- the plan's compiler there are none, and the store scan remains.
+haddockDirsFor :: BuildPlan -> IO (Map.Map UnitId FilePath)
+haddockDirsFor plan = do
+  (dbs, unreadable) <- Origins.discoverPackageDbs (bpCompiler plan)
+  mapM_ (warnOrigin . Origins.renderOriginError) unreadable
+  docs <- Origins.haddockHtmlDirs (bpCompiler plan) dbs
+  either (\e -> Map.empty <$ warnOrigin (Origins.renderOriginError e)) pure docs
+  where
+    warnOrigin t = hPutStrLn stderr ("hypha: " <> Text.unpack t)
+
+planToLocalUnits :: Map.Map UnitId FilePath -> BuildPlan -> [HogLocal.LocalUnit]
+planToLocalUnits docs plan =
   [ HogLocal.LocalUnit
       { HogLocal.luPkgId   = puId u
       , HogLocal.luSrcDirs = unitSrcDirs u
+      , HogLocal.luHaddockHtml = Map.lookup (puUnitId u) docs
       , HogLocal.luIsLocal = puIsLocal u
       }
   | u <- Map.elems (bpUnits plan)
