@@ -19,6 +19,7 @@ module Hypha.Cli.Types
   , commandName
   ) where
 
+import Data.List.NonEmpty (NonEmpty)
 import Data.Text (Text)
 import Data.Text qualified as T
 
@@ -139,8 +140,8 @@ data ClientCommand
     -- ^ @package <pkg>[@ver]@
   | ModuleCommand !Text
     -- ^ @module <pkg>/<Mod>@
-  | SymbolCommand !Text
-    -- ^ @symbol <pkg>/<Mod>/<sym>@
+  | SymbolCommand !(NonEmpty Text)
+    -- ^ @symbol <pkg>/<Mod>/<sym>...@: one card, or one per path in order
   | SourceCommand !Text
     -- ^ @source <pkg>/<Mod>/<sym>@ or @<pkg>/<Mod>@
   | VersionsCommand !Text

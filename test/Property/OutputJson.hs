@@ -3,6 +3,8 @@
 module Property.OutputJson (tests) where
 
 import Data.Aeson (object, (.=))
+import Data.Aeson qualified as Aeson
+import Data.Aeson.KeyMap qualified as KM
 import Data.Set qualified as Set
 import Data.Text qualified as Text
 import Data.Text (Text)
@@ -20,6 +22,7 @@ import Hypha.Error (HyphaError (..), NotFoundReason (..))
 import Hypha.Types.PackageId (PackageName (..))
 import Hypha.Output.Json
   ( ToOutcomeJson (..), encodeSuccessEnvelope, encodeErrorEnvelope
+  , encodeOutcomeEnvelope
   , filterSelect, objectKeys, parseSelectList
   , EnvelopeOpts (..), defaultEnvelopeOpts, unmatchedSelect )
 import Hypha.Output.Outcome (successOutcome)
@@ -119,7 +122,27 @@ tests = testGroup "OutputJson"
   , testCase "select aliases canonicalize to the wire field names"      testSelectAliases
   , testCase "aliased select keeps the aliased fields"                  testSelectAliasesProject
   , testCase "a select name the command cannot answer is reported"      testUnmatchedSelect
+  , testCase "a list of cards is projected card by card"                testProjectList
   ]
+
+-- | @hypha symbol A B@ answers with a list; the field set and --select
+-- apply to each card, as they would to one.
+testProjectList :: IO ()
+testProjectList = do
+  let card n = toFullJSON (SymbolCard n "fn" "p" "1.0" "M"
+                             (Just (n <> " :: Int")) (Just " doc")
+                             (Just (SourceLoc "M.hs" 3 Nothing)))
+      cards  = Aeson.toJSON [card "x", card "y"]
+      env o  = encodeOutcomeEnvelope o (Set.fromList ["name", "signature"])
+                 (Set.fromList ["name", "signature", "source"])
+                 (successOutcome SymbolCmd cards)
+      result o = case env o of
+        Aeson.Object e | Just (Aeson.Array xs) <- KM.lookup "result" e ->
+          map objectKeys (foldr (:) [] xs)
+        other -> error ("expected a list result: " <> show other)
+  result defaultEnvelopeOpts @?= replicate 2 (Set.fromList ["name", "signature"])
+  result defaultEnvelopeOpts { eoSelect = ["signature"] }
+    @?= replicate 2 (Set.fromList ["signature"])
 
 testSuccessEnvelope :: IO ()
 testSuccessEnvelope = do

@@ -19,11 +19,15 @@ import Control.Exception.Safe (SomeException (..), bracket, try, tryAny)
 import Crypto.Hash.SHA256 qualified as SHA256
 import Data.Aeson qualified as Aeson
 import Data.Aeson (Value)
+import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Base16 qualified as Base16
 import Data.ByteString.Lazy qualified as LBS
 import qualified Data.Aeson.Yaml as Aeson.Yaml
 import Data.Map.Strict qualified as Map
+import Control.Monad (forM)
 import Data.List (partition)
+import Data.List.NonEmpty (NonEmpty (..))
+import Data.List.NonEmpty qualified as NE
 import Data.Maybe (isJust, maybeToList)
 import Data.Set qualified as Set
 import Data.Set (Set)
@@ -352,7 +356,8 @@ runClientCommand = \case
     oc <- liftIO (Module.runModuleFromDir d pid modPath)
     pure (tagOutsidePlan oc (rpIsOutsidePlan rp))
 
-  SymbolCommand arg -> runSymbolArm arg
+  SymbolCommand (arg :| []) -> runSymbolArm arg
+  SymbolCommand args        -> runSymbolsArm args
 
   SourceCommand arg -> do
     (pkgT, modPath, mSym) <- parsePkgModOptSym arg
@@ -440,8 +445,41 @@ runSymbolArm arg = do
   -- 'Symbol.runSymbolWith'.  Handing over 'dependencyReach' partially
   -- applied keeps that parse in one place.
   liftEitherIO
-    (Symbol.runSymbolWith (bpBuildContext plan) env resolver
+    (Symbol.runSymbolWith (Source.readers (bpBuildContext plan)) env resolver
        (dependencyReach plan resolver (ownerOracleFor plan)) arg)
+
+-- | Several symbol paths in one run: the plan and the resolver are loaded,
+-- and each package read and parsed, once rather than once per path.  The result is
+-- a list in argument order; a path that fails is reported in its place,
+-- so one typo does not cost the other cards.  Fails as a whole only when
+-- every path does, with the first path's error.
+runSymbolsArm :: NonEmpty Text -> Hypha (Outcome Value)
+runSymbolsArm args = do
+  (resolver, env, plan) <- loadResolverAndPlan
+  let reach = dependencyReach plan resolver (ownerOracleFor plan)
+  rd <- liftIO (Source.memoReaders (bpBuildContext plan))
+  results <- liftIO $ forM args $ \arg ->
+    (,) arg <$> Symbol.runSymbolWith rd env resolver reach arg
+  case [ oc | (_, Right oc) <- NE.toList results ] of
+    [] -> case NE.head results of
+      (_, Left err) -> throwError err
+      (_, Right oc) -> pure oc
+    ocs -> pure Outcome
+      { outcomeResult      = Aeson.toJSON (map card (NE.toList results))
+      , outcomeTag         = SymbolCmd
+      , outcomeOutsidePlan = any outcomeOutsidePlan ocs
+      , outcomeOverrides   = []
+      , outcomeActions     = mempty
+      }
+  where
+    card (arg, Right oc) = case outcomeResult oc of
+      Aeson.Object o -> Aeson.Object (KM.insert "id" (Aeson.String arg) o)
+      v              -> v
+    card (arg, Left err) = Aeson.object
+      [ "id"    Aeson..= arg
+      , "error" Aeson..= Aeson.object
+          [ "code" Aeson..= errorCode err, "message" Aeson..= errorMessage err ]
+      ]
 
 -- | How the reach asks which unit owns a module: @ghc-pkg@ over the global
 -- database and every store database we can find.

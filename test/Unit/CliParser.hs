@@ -15,11 +15,20 @@ import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertFailure, testCase, (@?=))
 
 import Hypha.Cli.Parser (cliParserInfo)
-import Hypha.Cli.Types (HyphaOptions (..), TimeoutSeconds (..), timeoutMicros)
+import Data.List.NonEmpty (NonEmpty (..))
+import Hypha.Cli.Types
+  ( ClientCommand (..), Command (..), HyphaOptions (..), TimeoutSeconds (..)
+  , timeoutMicros )
 
 tests :: TestTree
 tests = testGroup "Unit.CliParser"
-  [ testCase "--version reports the version and exits successfully" $
+  [ testCase "symbol takes several paths, in order" $
+      case execParserPure defaultPrefs cliParserInfo ["symbol", "a/B/c", "d/E/f"] of
+        Success (_, ClientCommands (SymbolCommand ps)) ->
+          ps @?= "a/B/c" :| ["d/E/f"]
+        _ -> assertFailure "expected a symbol command with two paths"
+
+  , testCase "--version reports the version and exits successfully" $
       -- The first thing anyone types after installing.  It has to exit
       -- 0: a version probe that exits non-zero reads as "this build is
       -- broken" to a shell script and to a person alike.

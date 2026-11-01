@@ -14,6 +14,7 @@ import Test.Tasty (TestTree, testGroup)
 
 import Hypha.Project.BuildContext (hostBuildContext)
 import Hypha.BuildEnv.Type (BuildEnv (..))
+import Hypha.Command.Source (readers)
 import Hypha.Command.Symbol (runSymbolWith)
 import Hypha.Error (HyphaError, errorMessage)
 import Hypha.Output.Json (encodeSuccessEnvelope)
@@ -61,6 +62,6 @@ runSymbolCommand =
     pipeline = do
       let env      = mockBuildEnv asyncDir
           resolver = resolverFor [(asyncId, asyncDir)]
-      ExceptT (liftIO (runSymbolWith hostBuildContext env resolver
+      ExceptT (liftIO (runSymbolWith (readers hostBuildContext) env resolver
                         (dependencyReach emptyBuildPlan resolver noOwnerOracle)
                         "async/Control.Concurrent.Async/concurrently"))

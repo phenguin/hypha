@@ -15,6 +15,10 @@ module Hypha.Command.Source
   , SymbolSite (..)
   , siteLocation
   , locateSymbolSite
+  , Readers (..)
+  , readers
+  , memoReaders
+  , memoReadersWith
   , symbolNotFound
   ) where
 
@@ -22,6 +26,8 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Except (ExceptT, runExceptT, throwE)
 import Data.Aeson qualified as Aeson
 import Data.Aeson (Value (..), (.=))
+import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Set (Set)
 import Data.Text qualified as Text
@@ -39,8 +45,10 @@ import Hypha.Types.ComponentName
   (ComponentKey (..), componentKeyOf)
 import Hypha.Source.Locate
   ( LocatedDefinition (..), SourceLocation (..), findModuleFile
-  , locateDefinitionInComponent, locateSymbolDefinitionInDir )
+  , locateDefinitionInComponentUsing, defaultSearchBounds
+  , ParseSources, locateSymbolDefinitionInDir )
 import Hypha.Source.Extensions qualified as Extensions
+import Hypha.Source.Interface qualified as Interface
 import Hypha.Source.Parser qualified as Parser
 import Hypha.Source.Reach
   ( OutsideReach (..), SymbolSearchFailure (..) )
@@ -186,7 +194,7 @@ sourceFromDirE ctx reach pid srcDir modPath mSym = do
     Nothing  -> moduleHeaderSnippet ctx srcDir modPath
     Just sym -> do
       located <- liftIO
-        (locateSymbolSite ctx reach pid srcDir
+        (locateSymbolSite (readers ctx) reach pid srcDir
            (ModulePath modPath) (SymbolName sym))
       site <- case located of
         Right s  -> pure s
@@ -327,17 +335,15 @@ siteLocation = \case
 -- package.  A caller with no plan gets an empty reach — the plan-less path
 -- reports the re-export it cannot follow rather than guessing at one.
 locateSymbolSite
-  :: BuildContext
-     -- ^ The plan's CPP environment and platform, so this path reads a
-     -- module the same way the indexer does.
+  :: Readers
   -> OutsideReach IO
   -> PackageId
   -> FilePath
   -> ModulePath
   -> SymbolName
   -> IO (Either SymbolSearchFailure SymbolSite)
-locateSymbolSite ctx reach pid srcDir asking sym = do
-  comps <- Indexer.packageSources srcDir ctx
+locateSymbolSite rd reach pid srcDir asking sym = do
+  comps <- readersSources rd srcDir
   -- The component key comes from the 'PackageId' the caller already
   -- holds.  Deriving it from the cabal file's basename was a second,
   -- weaker answer to a question that was already settled -- and for a
@@ -352,7 +358,8 @@ locateSymbolSite ctx reach pid srcDir asking sym = do
   case matching of
     ((langs, kind, sources) : _) ->
       fmap ResolvedSite
-        <$> locateDefinitionInComponent langs (compKey kind) sources
+        <$> locateDefinitionInComponentUsing defaultSearchBounds
+              (readersParse rd) langs (compKey kind) sources
               reach asking sym
     -- The scan is for a module we cannot resolve, never for one the
     -- package does not have.  Ranking every same-named binding in the
@@ -381,6 +388,54 @@ locateSymbolSite ctx reach pid srcDir asking sym = do
           pure $ case swept of
             Just loc -> Right (SweptSite loc)
             Nothing  -> Left (SearchSweptPackage srcDir)
+
+-- | How locating a symbol reads a package: its library components and
+-- their module sources, given its source directory, and the parse of a
+-- component's modules.
+data Readers = Readers
+  { readersSources :: FilePath -> IO [(Comp.ComponentInfo, [ModuleSource])]
+  , readersParse   :: ParseSources
+  }
+
+-- | Read afresh each time: 'Indexer.packageSources' under the plan's CPP
+-- environment and platform, so this path reads a module the same way the
+-- indexer does.
+readers :: BuildContext -> Readers
+readers ctx = Readers
+  { readersSources = \dir -> Indexer.packageSources dir ctx
+  , readersParse   = Interface.parseSources
+  }
+
+-- | 'readers', remembered for the life of the result: each package
+-- directory read once, and each component (its module files) parsed once.
+-- For a run that locates many symbols, where re-parsing the component is
+-- most of what each one costs.
+memoReaders :: BuildContext -> IO Readers
+memoReaders = memoReadersWith . readers
+
+-- | Any 'Readers', remembered: a package directory by its path, a
+-- component by its module files.
+memoReadersWith :: Readers -> IO Readers
+memoReadersWith fresh = do
+  srcs   <- memo (readersSources fresh)
+  parses <- newIORef Map.empty
+  pure Readers
+    { readersSources = srcs
+    , readersParse   = \langs sources ->
+        remember parses (map msPath sources) (readersParse fresh langs sources)
+    }
+  where
+    memo f = do
+      ref <- newIORef Map.empty
+      pure (\k -> remember ref k (f k))
+    remember ref k act = do
+      seen <- readIORef ref
+      case Map.lookup k seen of
+        Just v  -> pure v
+        Nothing -> do
+          v <- act
+          modifyIORef' ref (Map.insert k v)
+          pure v
 
 -- | The error a failed location becomes, with the reach's own gaps folded
 -- in.

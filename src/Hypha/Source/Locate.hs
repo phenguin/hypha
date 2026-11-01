@@ -7,6 +7,8 @@ module Hypha.Source.Locate
   , locateSymbolDefinitionInDir
   , locateDefinitionInComponent
   , locateDefinitionInComponentWith
+  , locateDefinitionInComponentUsing
+  , ParseSources
   , SearchBounds (..)
   , defaultSearchBounds
   , LocatedDefinition (..)
@@ -250,13 +252,37 @@ locateDefinitionInComponent = locateDefinitionInComponentWith defaultSearchBound
 locateDefinitionInComponentWith
   :: SearchBounds
   -> Extensions.LanguageSettings
+  -> ComponentKey
+  -> [ModuleSource]
+  -> OutsideReach IO
+  -> ModulePath
+  -> SymbolName
+  -> IO (Either SymbolSearchFailure LocatedDefinition)
+locateDefinitionInComponentWith bounds =
+  locateDefinitionInComponentUsing bounds Interface.parseSources
+
+-- | How a component's modules are parsed: 'Interface.parseSources', or a
+-- memo of it when one run locates many symbols in the same component.
+type ParseSources
+  =  Extensions.LanguageSettings
+  -> [ModuleSource]
+  -> IO [(ModuleSource, Either Parser.ParseError Interface.ModuleInterface)]
+
+-- | 'locateDefinitionInComponentWith' with the component parse supplied.
+-- Resolving a name parses every module of its component, which is most
+-- of what locating one symbol costs; a caller locating many shares one
+-- parse.
+locateDefinitionInComponentUsing
+  :: SearchBounds
+  -> ParseSources
+  -> Extensions.LanguageSettings
   -> ComponentKey                                  -- ^ the asking component
   -> [ModuleSource]
   -> OutsideReach IO                               -- ^ what lies outside it
   -> ModulePath
   -> SymbolName
   -> IO (Either SymbolSearchFailure LocatedDefinition)
-locateDefinitionInComponentWith bounds langs ownComponent sources reach asking sym =
+locateDefinitionInComponentUsing bounds parseAll langs ownComponent sources reach asking sym =
   -- The index's answer first when there is one: it was resolved once, for
   -- the whole component, and taking it costs a single parse where
   -- following the chain costs one per hop.  Resolving from source is the
@@ -279,7 +305,7 @@ locateDefinitionInComponentWith bounds langs ownComponent sources reach asking s
       pure (def, om)
 
     byResolution = do
-      parsed <- Interface.parseSources langs sources
+      parsed <- parseAll langs sources
       mapM_ reportParseFailure [ (ms, e) | (ms, Left e) <- parsed ]
       let ifaces     = [ i | (_, Right i) <- parsed ]
           resolution = Reexport.resolveComponent ifaces

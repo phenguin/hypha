@@ -168,11 +168,13 @@ unmatchedSelect opts compact full oc =
       missed    = filter (`Set.notMember` available) (eoSelect opts)
   in (missed, available)
 
--- | Internal: keep only the listed keys at the top level of an 'Object'.
--- Pass-through on non-objects so primitive results are not silently dropped.
+-- | Internal: keep only the listed keys at the top level of an 'Object',
+-- or of each object in a list of results.  Pass-through on other values
+-- so primitive results are not silently dropped.
 restrictKeys :: Set Text -> Value -> Value
 restrictKeys keys (Object km) =
   Object (KM.filterWithKey (\k _ -> Key.toText k `Set.member` keys) km)
+restrictKeys keys (Array xs) = Array (fmap (restrictKeys keys) xs)
 restrictKeys _ v = v
 
 -- | Post-filter a JSON value, keeping only the listed top-level keys.
@@ -188,10 +190,11 @@ restrictBody keys (Object obj) =
   in Object (KM.filterWithKey (\k _ -> k `Set.member` keep) obj)
 restrictBody _ v = v
 
--- | Extract the set of top-level keys from a JSON 'Value'.  Non-objects
--- yield the empty set.
+-- | Extract the set of top-level keys from a JSON 'Value', or of every
+-- object in a list of results.  Other values yield the empty set.
 objectKeys :: Value -> Set Text
 objectKeys (Object obj) = Set.fromList (map Key.toText (KM.keys obj))
+objectKeys (Array xs)   = foldMap objectKeys xs
 objectKeys _            = Set.empty
 
 -- | Split a comma-separated select-list, trimming whitespace, dropping

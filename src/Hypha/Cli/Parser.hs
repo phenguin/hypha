@@ -14,6 +14,7 @@ module Hypha.Cli.Parser
   , cliParserInfo
   ) where
 
+import Data.List.NonEmpty (some1)
 import Options.Applicative
 import Text.Read (readMaybe)
 
@@ -160,9 +161,12 @@ moduleParser = fmap ClientCommands $ ModuleCommand
 
 symbolParser :: Parser Command
 symbolParser = fmap ClientCommands $ SymbolCommand
-  <$> strArgument
-        ( metavar "PKG[-VER]/MOD/SYM"
-       <> help "Symbol path (pkg or pkg-version, then /Module/symbol)" )
+  <$> some1 (strArgument
+        ( metavar "PKG[-VER]/MOD/SYM..."
+       <> help ("Symbol path (pkg or pkg-version, then /Module/symbol). "
+             <> "With several, the result is a list with one card per path, "
+             <> "in order, each carrying its \"id\"; a path that fails gives "
+             <> "{id, error} in its place") ))
 
 sourceParser :: Parser Command
 sourceParser = fmap ClientCommands $ SourceCommand

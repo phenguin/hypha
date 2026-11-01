@@ -32,6 +32,9 @@ import           Hypha.Types.ComponentName (ComponentKey (..))
 import           Hypha.Types.PackageId
                    (PackageId (..), PackageName (..), Version (..))
 import           Hypha.Types.SymbolPath (ModulePath (..), SymbolName (..))
+import           Data.IORef (modifyIORef', newIORef, readIORef)
+import           Hypha.Command.Source (Readers (..), memoReadersWith)
+import qualified Hypha.Source.Interface as Interface
 import           Util.Fixture (depSources, fixtureSources, sourcesFor)
 
 -- | What the server hands a browsing pass: the definition site the index
@@ -61,7 +64,31 @@ depReachSourcesOnly = reachFrom (const defaultLanguageSettings) . depSourcesOnly
 
 tests :: TestTree
 tests = testGroup "Unit.SourceLocate"
-  [ testCase "an intra-component re-export resolves to its definition" $ do
+  [ testCase "shared readers parse a component once and locate the same sites" $ do
+      -- What makes `hypha symbol A B C …` cheap: every name of a component
+      -- is resolved against one parse of it, not one parse per name.
+      srcs   <- fixtureSources
+      parses <- newIORef (0 :: Int)
+      let counting = Readers
+            { readersSources = const (pure [])
+            , readersParse   = \ls ms -> do
+                modifyIORef' parses (+ 1)
+                Interface.parseSources ls ms
+            }
+      shared <- memoReadersWith counting
+      let at rd s = Locate.locateDefinitionInComponentUsing
+                      Locate.defaultSearchBounds (readersParse rd)
+                      defaultLanguageSettings (ComponentKey "reexport") srcs
+                      noOutsideReach (ModulePath "Fixture.Wrapper") (SymbolName s)
+          site = fmap (\ld -> (Locate.ldModule ld, Locate.ldLocation ld))
+      viaShared <- mapM (fmap site . at shared) ["insertBag", "Bag"]
+      readIORef parses >>= (@?= 1)
+      viaFresh  <- mapM (fmap site . at counting) ["insertBag", "Bag"]
+      map (either (const Nothing) Just) viaShared
+        @?= map (either (const Nothing) Just) viaFresh
+      assertBool "both names located" (all (either (const False) (const True)) viaShared)
+
+  , testCase "an intra-component re-export resolves to its definition" $ do
       srcs <- fixtureSources
       mLd  <- Locate.locateDefinitionInComponent defaultLanguageSettings
                 (ComponentKey "reexport") srcs noOutsideReach
