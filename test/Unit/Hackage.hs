@@ -10,7 +10,7 @@ import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 
 import Hypha.Hackage.Api
-  (HackageClient(..), HackageError(..), mkOfflineHackageClient, packageJsonUrl)
+  (HackageClient(..), HackageError(..), latestVersion, mkOfflineHackageClient, packageJsonUrl)
 import Hypha.Hackage.Source (fetchAndExtractSource)
 import Hypha.Hackage.Cache (mkCacheKey, insertCache)
 import Hypha.Hackage.Types (CacheKind(..), CachedResponse(..))
@@ -66,6 +66,20 @@ tests = testGroup "Unit.Hackage"
         result <- fetchVersions client pkgName
         assertEqual "versions read back from the package.json cache entry"
           (Right [Version "0.3.0.2", Version "0.0.1.0"]) result
+
+  , testCase "latest is the newest non-deprecated version in a package.json" $ do
+      -- The shape Hackage serves for <pkg>.json: version -> status, no
+      -- "version" field.  Reading a "version" field instead made every
+      -- package outside the plan and the store fail as CORRUPTION.
+      let json = object
+            [ "2.2.3.0"  .= ("normal" :: String)
+            , "2.10.0.0" .= ("deprecated" :: String)
+            , "2.9.1.0"  .= ("normal" :: String)
+            ]
+      assertEqual "skips the deprecated 2.10" (Just (Version "2.9.1.0")) (latestVersion json)
+      assertEqual "all deprecated: the newest"
+        (Just (Version "0.2")) (latestVersion (object ["0.1" .= ("deprecated" :: String), "0.2" .= ("deprecated" :: String)]))
+      assertEqual "no versions" Nothing (latestVersion (object []))
 
   , testCase "Offline mode refuses to fetch a source tarball" $
       withSystemTempDirectory "hypha-hackage" $ \cacheDir -> do

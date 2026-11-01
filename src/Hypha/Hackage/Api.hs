@@ -14,6 +14,7 @@ module Hypha.Hackage.Api
   , userAgent
   , sourceTarballUrl
   , packageJsonUrl
+  , latestVersion
   ) where
 
 import Control.Concurrent (threadDelay)
@@ -276,6 +277,20 @@ fetchSourceTarballOnline manager pid = do
       in if status >= 200 && status < 300
            then Right (responseBody resp)
            else Left (HttpError status)
+
+-- | The version Hackage calls latest: the newest one not deprecated, or
+-- the newest of all when every version is deprecated.
+latestVersion :: Value -> Maybe Version
+latestVersion json = case extractVersionList json of
+  []         -> Nothing
+  vs@(v : _) -> Just (headOr v (filter normal vs))
+  where
+    normal (Version v) = case json of
+      Aeson.Object obj -> KM.lookup (Key.fromText v) obj == Just (Aeson.String "normal")
+      _                -> False
+    headOr d = \case
+      x : _ -> x
+      []    -> d
 
 -- | Pull every version key out of a package.json response.  Hackage's
 -- @\<pkg\>.json@ is a flat @{ "0.6.7": "normal", "0.7": "deprecated" }@

@@ -26,10 +26,6 @@ module Hypha.Package.Resolver
 
 import Control.Monad (msum)
 import Control.Monad.Trans.Maybe (MaybeT (..), runMaybeT)
-import Data.Aeson (Value)
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KM
 import Data.Maybe (mapMaybe)
 import qualified Data.Set as Set
 import qualified Data.Text as Text
@@ -164,7 +160,7 @@ resolvePackageWith env hclient plan name = do
           result <- fetchPackageJson hclient name
           case result of
             Left err   -> pure (Left (hackageErrorToHypha name err))
-            Right json -> case extractVersion json of
+            Right json -> case Hackage.latestVersion json of
               Just ver -> pure (Right ResolvedPackage
                 { rpPkgId         = PackageId name ver
                 , rpIsOutsidePlan = True
@@ -277,13 +273,6 @@ planSrcDir plan name =
     _                                 -> Nothing
 
 -- | Extract the version field from a Hackage package JSON response.
-extractVersion :: Value -> Maybe Version
-extractVersion = \case
-  Aeson.Object obj -> do
-    Aeson.String ver <- KM.lookup (Key.fromText "version") obj
-    Just (Version ver)
-  _ -> Nothing
-
 -- | Convert a 'Hackage.HackageError' to a 'HyphaError'.  Offline-cache
 -- miss maps to the conceptually-correct 'NotFound' umbrella; every
 -- other variant is preserved structurally under 'HackageFailure', so
